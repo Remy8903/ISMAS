@@ -1,0 +1,6 @@
+# ISMAS agent config for sim-db
+batch_interval: 30
+processes: [mariadbd]
+logs:
+  - { path: /var/log/mysql/error.log, type: generic,    source: mysql_error }
+  - { path: /var/log/mysql/slow.log,  type: mysql_slow, source: mysql_slow }

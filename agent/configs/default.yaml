@@ -1,0 +1,6 @@
+# Fallback config (real Linux server / VPS) - adjust as needed
+batch_interval: 30
+processes: []
+logs:
+  - { path: /var/log/syslog,   type: generic, source: syslog }
+  - { path: /var/log/auth.log, type: generic, source: auth }

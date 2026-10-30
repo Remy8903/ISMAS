@@ -1,0 +1,107 @@
+name: ismas-lab
+
+services:
+  # ---------- Fake server 1: web (Nginx + PHP + agent) ----------
+  sim-web:
+    build: ./sim-web
+    container_name: sim-web
+    hostname: sim-web
+    ports:
+      - "8081:80"
+    environment:
+      SERVER_NAME: sim-web
+      TZ: Asia/Kuala_Lumpur
+      AGENT_DRY_RUN: "0"            # "1" = print payloads only (debug)
+      INGEST_URL: http://n8n:5678/webhook/ismas-ingest
+      AGENT_TOKEN: ${AGENT_TOKEN:-dev-token-change-me}
+      DB_HOST: sim-db
+      DB_NAME: ismas_demo
+      DB_USER: app
+      DB_PASS: apppass
+    volumes:
+      - ../agent:/opt/agent:ro          # live-mount agent code (no rebuild needed)
+    mem_limit: 256m
+    cpus: 0.5
+    depends_on:
+      - sim-db
+    restart: unless-stopped
+
+  # ---------- Fake server 2: database (MariaDB + agent) ----------
+  sim-db:
+    build: ./sim-db
+    container_name: sim-db
+    hostname: sim-db
+    ports:
+      - "3307:3306"
+    environment:
+      SERVER_NAME: sim-db
+      TZ: Asia/Kuala_Lumpur
+      AGENT_DRY_RUN: "0"            # "1" = print payloads only (debug)
+      INGEST_URL: http://n8n:5678/webhook/ismas-ingest
+      AGENT_TOKEN: ${AGENT_TOKEN:-dev-token-change-me}
+      MARIADB_ROOT_PASSWORD: rootpass
+      MARIADB_DATABASE: ismas_demo
+      MARIADB_USER: app
+      MARIADB_PASSWORD: apppass
+    volumes:
+      - ../agent:/opt/agent:ro
+      - db_data:/var/lib/mysql
+    mem_limit: 512m
+    cpus: 0.5
+    restart: unless-stopped
+
+  # ---------- Postgres (n8n DB + ISMAS data) ----------
+  postgres:
+    image: postgres:16-alpine
+    container_name: ismas-postgres
+    environment:
+      POSTGRES_USER: ismas
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ismas-dev-pass}
+      POSTGRES_DB: n8n
+      TZ: Asia/Kuala_Lumpur
+      PGTZ: Asia/Kuala_Lumpur
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro   # creates "ismas" DB + tables (first start only)
+    ports:
+      - "5433:5432"                     # for DBeaver/TablePlus from Windows
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ismas -d n8n"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ---------- Local n8n (dev only; VPS later) ----------
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    container_name: n8n-local
+    ports:
+      - "5678:5678"
+    environment:
+      GENERIC_TIMEZONE: Asia/Kuala_Lumpur
+      TZ: Asia/Kuala_Lumpur
+      N8N_SECURE_COOKIE: "false"        # localhost over http
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: "72"
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: "5432"
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: ismas
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:-ismas-dev-pass}
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"   # lets Code nodes read $env below
+      ISMAS_AGENT_TOKEN: ${AGENT_TOKEN:-dev-token-change-me}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  db_data:
+  n8n_data:
+  pg_data:

@@ -1,0 +1,8 @@
+# ISMAS agent config for sim-web
+batch_interval: 30
+processes: [nginx, php-fpm]
+logs:
+  - { path: /var/log/nginx/access.log, type: nginx_access, source: nginx_access }
+  - { path: /var/log/nginx/error.log,  type: generic,      source: nginx_error }
+  - { path: /var/log/app/app.log,      type: app_json,     source: app }
+  - { path: /var/log/php/error.log,    type: generic,      source: php }
