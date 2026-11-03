@@ -6,3 +6,4 @@ logs:
   - { path: /var/log/nginx/error.log,  type: generic,      source: nginx_error }
   - { path: /var/log/app/app.log,      type: app_json,     source: app }
   - { path: /var/log/php/error.log,    type: generic,      source: php }
+disk_paths: [/, /data]          # /data = small 64MB tmpfs for disk-full chaos test

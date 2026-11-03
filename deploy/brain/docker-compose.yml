@@ -1,0 +1,57 @@
+name: ismas
+
+# Brain only (n8n + Postgres). Nothing is exposed publicly:
+# n8n listens on 127.0.0.1 and `tailscale serve` publishes it over HTTPS inside the tailnet.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ismas-postgres
+    environment:
+      POSTGRES_USER: ismas
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_DB: n8n
+      TZ: Asia/Kuala_Lumpur
+      PGTZ: Asia/Kuala_Lumpur
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ../../simulated-servers/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ismas -d n8n"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:${N8N_VERSION:?pin a version in .env}
+    container_name: n8n
+    ports:
+      - "127.0.0.1:5678:5678"
+    environment:
+      GENERIC_TIMEZONE: Asia/Kuala_Lumpur
+      TZ: Asia/Kuala_Lumpur
+      N8N_HOST: ${TS_HOSTNAME:?set in .env}
+      N8N_PROTOCOL: https
+      WEBHOOK_URL: https://${TS_HOSTNAME}/
+      N8N_PROXY_HOPS: "1"
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: "72"
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: "5432"
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: ismas
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"   # workflows read $env.ISMAS_AGENT_TOKEN / TELEGRAM_CHAT_ID
+      ISMAS_AGENT_TOKEN: ${AGENT_TOKEN:?set in .env}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:?set in .env}
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  n8n_data:

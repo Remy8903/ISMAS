@@ -22,7 +22,7 @@ class Agent:
     def __init__(self):
         self.cfg = config.load()
         self.th = self.cfg["thresholds"]
-        self.metrics = Metrics()
+        self.metrics = Metrics(self.cfg["disk_paths"])
         self.sender = Sender(self.cfg)
         self.agg = Aggregator()
         self.sources = [
@@ -86,11 +86,11 @@ class Agent:
         return procs
 
     def metric_events(self, m):
-        for key, label in (("cpu_pct", "CPU"), ("mem_pct", "Memory"), ("disk_pct", "Disk")):
-            v = m.get(key)
+        checks = [("cpu", "CPU", m.get("cpu_pct")), ("mem", "Memory", m.get("mem_pct"))]
+        checks += [("disk", f"Disk {path}", v) for path, v in (m.get("disks") or {}).items()]
+        for short, label, v in checks:
             if v is None:
                 continue
-            short = key.split("_")[0]
             if v >= self.th[f"{short}_crit"]:
                 self.record("metrics", "critical", f"{label} usage critical at {v}%")
             elif v >= self.th[f"{short}_warn"]:

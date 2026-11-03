@@ -1,0 +1,157 @@
+{
+  "name": "ISMAS Watchdog",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "3ebe5926-af48-4d16-af4b-1c2925d481cb",
+      "name": "Every Minute",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH down AS (\n  UPDATE servers SET status = 'down'\n  WHERE status = 'up' AND last_seen < now() - interval '90 seconds'\n  RETURNING name, last_seen\n),\nins AS (\n  INSERT INTO incidents (signature, severity, title, root_cause, affected_servers, alerted)\n  SELECT 'down_' || name, 'critical', name || ' stopped reporting',\n         'No data received from agent since ' || to_char(last_seen AT TIME ZONE 'Asia/Kuala_Lumpur', 'HH24:MI:SS'),\n         ARRAY[name], true\n  FROM down\n)\nSELECT name,\n       to_char(last_seen AT TIME ZONE 'Asia/Kuala_Lumpur', 'HH24:MI:SS') AS last_seen_at,\n       EXTRACT(EPOCH FROM now() - last_seen)::int AS silent_s\nFROM down;\n",
+        "options": {}
+      },
+      "id": "f6117969-a6b7-4110-a9df-2603f443fd09",
+      "name": "Mark Down",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        240,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all()\n  .filter(i => i.json.name)\n  .map(i => ({\n    json: {\n      telegram_text:\n        `🔴 <b>CRITICAL — ${i.json.name} stopped reporting</b>\\n` +\n        `No data for ${i.json.silent_s}s (last seen ${i.json.last_seen_at}).\\n\\n` +\n        `<b>Possible:</b> server/container down, agent crashed, or network issue.\\n` +\n        `<b>Check:</b> docker ps -a | grep ${i.json.name}`,\n    },\n  }));\n"
+      },
+      "id": "351d37bc-5134-4499-84d1-084b55f2cd0b",
+      "name": "Down Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "={{ $json.telegram_text }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "9586d8d1-c609-480a-89e5-40768227d88a",
+      "name": "Telegram Down",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        720,
+        200
+      ],
+      "webhookId": "de4cc910-97a6-4cd9-9c45-4a1c156cd767"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 3
+            }
+          ]
+        }
+      },
+      "id": "2719726c-537a-4b82-8f15-c619b77fce48",
+      "name": "Daily 3AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "DELETE FROM payloads WHERE received_at < now() - interval '7 days';\nDELETE FROM events   WHERE received_at < now() - interval '7 days';\n",
+        "options": {}
+      },
+      "id": "45e6967b-2efb-4516-a2e6-593493efb456",
+      "name": "Retention",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        240,
+        420
+      ]
+    }
+  ],
+  "connections": {
+    "Every Minute": {
+      "main": [
+        [
+          {
+            "node": "Mark Down",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Down": {
+      "main": [
+        [
+          {
+            "node": "Down Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Down Message": {
+      "main": [
+        [
+          {
+            "node": "Telegram Down",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily 3AM": {
+      "main": [
+        [
+          {
+            "node": "Retention",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false
+}

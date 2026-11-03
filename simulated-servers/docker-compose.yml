@@ -20,6 +20,8 @@ services:
       DB_PASS: apppass
     volumes:
       - ../agent:/opt/agent:ro          # live-mount agent code (no rebuild needed)
+    tmpfs:
+      - /data:size=64m                  # small "disk" for the disk-fill chaos test
     mem_limit: 256m
     cpus: 0.5
     depends_on:

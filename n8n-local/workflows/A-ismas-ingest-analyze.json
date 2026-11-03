@@ -1,0 +1,574 @@
+{
+  "name": "ISMAS Ingest & Analyze",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ismas-ingest",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "78798767-9e7b-44d0-bfe6-baf9fcf5bacf",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "3124f50a-02c4-432f-a301-26e8f19e610c"
+    },
+    {
+      "parameters": {
+        "jsCode": "const req = $input.first().json;\nconst p = req.body || {};\nconst token = (req.headers && req.headers['x-ismas-token']) || '';\nconst valid = token !== '' && token === $env.ISMAS_AGENT_TOKEN\n              && p.schema === 'ismas.v1' && !!p.server;\n\nconst RANK = { info: 0, warning: 1, error: 2, critical: 3 };\nconst events = Array.isArray(p.events) ? p.events.slice(0, 50) : [];\nconst maxLevel = events.reduce(\n  (m, e) => ((RANK[e.level] ?? 0) > (RANK[m] ?? 0) ? e.level : m), 'info');\n\n// New error/critical events the AI hasn't analyzed yet\nconst fresh = events.filter(e =>\n  (RANK[e.level] ?? 0) >= 2 && (p.type === 'critical' || !e.already_alerted));\n\n// Fingerprint of \"this problem\" for dedup (numbers / hashes stripped)\nconst norm = s => String(s).toLowerCase()\n  .replace(/<(ip|email):\\w+>/g, '<$1>')\n  .replace(/\\d+(\\.\\d+)?/g, 'N')\n  .slice(0, 160);\nconst sigSrc = [...new Set(fresh.map(e => `${p.server}|${e.source}|${e.level}|${norm(e.message)}`))]\n  .sort().join('||');\nlet h = 5381;\nfor (const c of sigSrc) h = ((h << 5) + h + c.charCodeAt(0)) >>> 0;\n\nreturn [{\n  json: {\n    valid,\n    server: p.server || null,\n    type: p.type || null,\n    sent_at: p.sent_at || null,\n    max_level: maxLevel,\n    needs_ai: valid && fresh.length > 0,\n    signature: sigSrc ? 'sig_' + h.toString(16) : null,\n    fresh_events: fresh,\n    payload: p,\n  },\n}];\n"
+      },
+      "id": "84d6d874-0d9e-44b0-a6dc-e1e415d8f54e",
+      "name": "Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "dc17600d-915b-47cb-a170-eae1f9231f75",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "2da2ad66-2332-4896-8d6c-eb3d4e79e044",
+      "name": "Is Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        480,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"ok\": false, \"error\": \"unauthorized\"}",
+        "options": {
+          "responseCode": 401
+        }
+      },
+      "id": "b2821427-facb-4bf8-a5c4-e66473fc0b45",
+      "name": "Reject",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        720,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"ok\": true}",
+        "options": {}
+      },
+      "id": "adcf3413-a2b3-49e7-a3ab-89e542339b6b",
+      "name": "Accept",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        720,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH d AS (SELECT $1::jsonb AS j),\nprev AS (\n  SELECT status FROM servers WHERE name = (SELECT j->>'server' FROM d)\n),\nup AS (\n  INSERT INTO servers (name, last_seen, status)\n  SELECT j->>'server', now(), 'up' FROM d\n  ON CONFLICT (name) DO UPDATE SET last_seen = now(), status = 'up'\n  RETURNING name\n),\np AS (\n  INSERT INTO payloads (server, type, sent_at, max_level, needs_ai, body)\n  SELECT j->>'server', j->>'type', (j->>'sent_at')::timestamptz,\n         j->>'max_level', (j->>'needs_ai')::boolean, j->'payload'\n  FROM d\n  RETURNING id\n),\ne AS (\n  INSERT INTO events (server, payload_type, source, level, message, count,\n                      first_seen, last_seen, already_alerted)\n  SELECT d.j->>'server', d.j->>'type', x->>'source', x->>'level', x->>'message',\n         COALESCE((x->>'count')::int, 1),\n         (x->>'first_seen')::timestamptz, (x->>'last_seen')::timestamptz,\n         COALESCE((x->>'already_alerted')::boolean, false)\n  FROM d, jsonb_array_elements(COALESCE(d.j->'payload'->'events', '[]'::jsonb)) x\n  RETURNING 1\n)\nSELECT (SELECT status FROM prev)  AS prev_status,\n       (SELECT id FROM p)         AS payload_id,\n       (SELECT count(*) FROM e)   AS events_stored,\n       (SELECT j->>'server' FROM d) AS server;\n",
+        "options": {
+          "queryReplacement": "={{ [ JSON.stringify($('Validate').first().json) ] }}"
+        }
+      },
+      "id": "3d836d82-01b1-4565-81b9-e3ea94c1dfd0",
+      "name": "Store",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        960,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "f76922a5-4e0a-4d35-a5e1-b959add6307c",
+              "leftValue": "={{ $json.prev_status }}",
+              "rightValue": "down",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {},
+        "looseTypeValidation": true
+      },
+      "id": "98502d27-018c-414d-bf9b-fc1894eb8bc0",
+      "name": "Was Down?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1200,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { telegram_text: `✅ <b>${$json.server} is back online</b>\\nAgent reporting again.` } }];\n"
+      },
+      "id": "a7fb2c00-cba8-4cd0-81a7-97bb1eb7e431",
+      "name": "Recovered Msg",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "={{ $json.telegram_text }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "777efd36-12a3-40e6-bc2a-39b7efa2c0b5",
+      "name": "Telegram Recovered",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1680,
+        20
+      ],
+      "webhookId": "3c9e8ed5-d156-47ef-96ce-26fecf8c1190"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "48f8ba84-ccee-4291-b9f8-d0e9ba678644",
+              "leftValue": "={{ $('Validate').first().json.needs_ai }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "d4986bdf-2fce-4687-9d98-b3f5483495d8",
+      "name": "Needs AI?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1200,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  (SELECT count(*) FROM incidents\n    WHERE signature = $1 AND created_at > now() - interval '15 minutes')::int AS recent_dupes,\n\n  (SELECT COALESCE(json_agg(t), '[]'::json) FROM (\n     SELECT server, source, level, message, count,\n            to_char(last_seen AT TIME ZONE 'Asia/Kuala_Lumpur', 'HH24:MI:SS') AS at\n     FROM events\n     WHERE received_at > now() - interval '5 minutes' AND level IN ('error', 'critical')\n     ORDER BY received_at DESC LIMIT 40) t) AS recent_events,\n\n  (SELECT COALESCE(json_agg(s), '[]'::json) FROM (\n     SELECT name, status,\n            EXTRACT(EPOCH FROM now() - last_seen)::int AS seconds_since_last_report\n     FROM servers ORDER BY name) s) AS servers;\n",
+        "options": {
+          "queryReplacement": "={{ [ $('Validate').first().json.signature ] }}"
+        }
+      },
+      "id": "1ab76446-f617-4bd5-b11c-f58a90ff97ea",
+      "name": "Context",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1440,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "70e94114-ae45-4c21-b40e-0c7d16ea043d",
+              "leftValue": "={{ $json.recent_dupes }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {},
+        "looseTypeValidation": true
+      },
+      "id": "6546f717-3fb3-4eb4-b068-d25420b267e1",
+      "name": "Not Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1680,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const v = $('Validate').first().json;\nconst ctx = $input.first().json;\nconst p = v.payload;\n\nconst system = `You are ISMAS, a senior SRE assistant analyzing server monitoring data.\nRespond ONLY with a single json object, no markdown, using exactly this shape:\n{\n  \"severity\": \"info\" | \"low\" | \"medium\" | \"high\" | \"critical\",\n  \"title\": \"short headline, max 80 chars\",\n  \"root_cause\": \"2-3 sentences. Cite the evidence (server, source, message, time).\",\n  \"affected_servers\": [\"server names\"],\n  \"correlated\": true | false,\n  \"fix_steps\": [\"up to 4 short imperative steps, include shell commands when useful\"],\n  \"confidence\": 0.0 to 1.0,\n  \"needs_human\": true | false\n}\nRules:\n- Use ONLY the data provided. Never invent log lines, servers or numbers.\n- A server whose seconds_since_last_report is above 60 may be down or unreachable.\n- When events on several servers are related, the earliest failure is usually the root cause; set \"correlated\": true.\n- If evidence is weak or ambiguous, say so in root_cause and lower confidence.\n- Severity guide: critical = service down or data at risk; high = users affected now;\n  medium = degraded or failing intermittently; low = minor; info = nothing actionable.\nExample output:\n{\"severity\":\"high\",\"title\":\"Web app failing: database refusing connections\",\"root_cause\":\"sim-web /db returns 'Connection refused' since 10:42 while sim-db has not reported for 75s. The database is likely down.\",\"affected_servers\":[\"sim-db\",\"sim-web\"],\"correlated\":true,\"fix_steps\":[\"docker start sim-db\",\"Check /var/log/mysql/error.log on sim-db\"],\"confidence\":0.85,\"needs_human\":true}`;\n\nconst data = {\n  reporting_server: v.server,\n  payload_type: v.type,                 // \"critical\" = sent immediately by the agent\n  sent_at: v.sent_at,\n  metrics: p.metrics,\n  processes: p.processes,\n  new_events: v.fresh_events,\n  recent_errors_all_servers_last_5min: ctx.recent_events,\n  server_status: ctx.servers,\n};\n\nreturn [{\n  json: {\n    body: {\n      model: 'deepseek-chat',\n      temperature: 0.2,\n      max_tokens: 800,\n      response_format: { type: 'json_object' },\n      messages: [\n        { role: 'system', content: system },\n        { role: 'user', content: 'Analyze this monitoring data and return the json object.\\n' + JSON.stringify(data) },\n      ],\n    },\n  },\n}];\n"
+      },
+      "id": "a4a96773-e004-4f9f-9a38-409fbb786234",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1920,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.deepseek.com/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "a5d1b63e-40ac-4883-a5ba-8c4d7dde113b",
+      "name": "DeepSeek",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2160,
+        260
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "const v = $('Validate').first().json;\nconst res = $input.first().json;\nconst content = res?.choices?.[0]?.message?.content || '';\n\nlet ai = null;\ntry { ai = JSON.parse(content); } catch (e) { ai = null; }\n\n// Fallback: never lose an alert just because the AI answer was broken/empty\nif (!ai || typeof ai !== 'object') {\n  ai = {\n    severity: v.max_level === 'critical' ? 'high' : 'medium',\n    title: `Unanalyzed ${v.max_level} events on ${v.server}`,\n    root_cause: 'AI response could not be parsed. First event: ' +\n      (v.fresh_events[0]?.message || 'n/a'),\n    affected_servers: [v.server],\n    fix_steps: [],\n    confidence: 0,\n    needs_human: true,\n    parse_failed: true,\n  };\n}\n\nconst SEV = ['info', 'low', 'medium', 'high', 'critical'];\nconst severity = SEV.includes(String(ai.severity).toLowerCase())\n  ? String(ai.severity).toLowerCase() : 'medium';\nconst confidence = Math.max(0, Math.min(1, Number(ai.confidence) || 0));\nconst servers = Array.isArray(ai.affected_servers) && ai.affected_servers.length\n  ? ai.affected_servers.map(String) : [v.server];\nconst steps = Array.isArray(ai.fix_steps) ? ai.fix_steps.slice(0, 4).map(String) : [];\nconst title = String(ai.title || 'Untitled incident').slice(0, 120);\nconst cause = String(ai.root_cause || '').slice(0, 1500);\n\n// Telegram (HTML parse mode) -- escape &, <, >\nconst esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst icon = { critical: '🔴', high: '🟠', medium: '🟡', low: '🔵', info: '⚪' }[severity];\nlet text = `${icon} <b>${severity.toUpperCase()} — ${esc(title)}</b>\\n`\n  + `Servers: ${esc(servers.join(', '))}${ai.correlated ? ' (correlated)' : ''}\\n\\n`\n  + `<b>Cause:</b> ${esc(cause)}`;\nif (steps.length) text += `\\n\\n<b>Fix:</b>\\n` + steps.map((s, i) => `${i + 1}) ${esc(s)}`).join('\\n');\ntext += `\\n\\nConfidence: ${confidence.toFixed(2)}${ai.needs_human ? ' · needs human' : ''}`;\n\nreturn [{\n  json: {\n    signature: v.signature,\n    severity,\n    title,\n    root_cause: cause,\n    affected_servers: servers,\n    fix_steps: steps,\n    confidence,\n    should_alert: ['high', 'critical'].includes(severity),\n    telegram_text: text.slice(0, 3900),\n    ai_raw: ai,\n  },\n}];\n"
+      },
+      "id": "9068a0a1-13fc-4f43-a12d-a60fc307e211",
+      "name": "Parse AI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2400,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO incidents (signature, severity, title, root_cause, affected_servers,\n                       fix_steps, confidence, alerted, ai_raw)\nSELECT j->>'signature', j->>'severity', j->>'title', j->>'root_cause',\n       ARRAY(SELECT jsonb_array_elements_text(COALESCE(j->'affected_servers', '[]'::jsonb))),\n       j->'fix_steps', (j->>'confidence')::numeric, (j->>'should_alert')::boolean, j->'ai_raw'\nFROM (SELECT $1::jsonb AS j) d\nRETURNING id;\n",
+        "options": {
+          "queryReplacement": "={{ [ JSON.stringify($('Parse AI').first().json) ] }}"
+        }
+      },
+      "id": "7f41dfb0-26b7-415b-90bd-cb457cbf193a",
+      "name": "Save Incident",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2640,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "13516381-d4f0-4a96-95f3-197ff88ed1d8",
+              "leftValue": "={{ $('Parse AI').first().json.should_alert }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "08fcb225-4cba-4279-a2a9-e462db3f7763",
+      "name": "Should Alert?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2880,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "={{ $('Parse AI').first().json.telegram_text }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "5e23039e-a74a-4918-9288-baa4c173e3e6",
+      "name": "Telegram Alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        3120,
+        240
+      ],
+      "webhookId": "90f77921-e251-4818-99cc-fe1e75fcef2a"
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate": {
+      "main": [
+        [
+          {
+            "node": "Is Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Valid?": {
+      "main": [
+        [
+          {
+            "node": "Accept",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reject",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Accept": {
+      "main": [
+        [
+          {
+            "node": "Store",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store": {
+      "main": [
+        [
+          {
+            "node": "Was Down?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Needs AI?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Was Down?": {
+      "main": [
+        [
+          {
+            "node": "Recovered Msg",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recovered Msg": {
+      "main": [
+        [
+          {
+            "node": "Telegram Recovered",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs AI?": {
+      "main": [
+        [
+          {
+            "node": "Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Context": {
+      "main": [
+        [
+          {
+            "node": "Not Duplicate?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Not Duplicate?": {
+      "main": [
+        [
+          {
+            "node": "Build Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompt": {
+      "main": [
+        [
+          {
+            "node": "DeepSeek",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DeepSeek": {
+      "main": [
+        [
+          {
+            "node": "Parse AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI": {
+      "main": [
+        [
+          {
+            "node": "Save Incident",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Incident": {
+      "main": [
+        [
+          {
+            "node": "Should Alert?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Alert?": {
+      "main": [
+        [
+          {
+            "node": "Telegram Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false
+}

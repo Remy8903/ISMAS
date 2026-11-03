@@ -15,7 +15,8 @@ def _read(path):
 
 
 class Metrics:
-    def __init__(self):
+    def __init__(self, disk_paths=None):
+        self.disk_paths = disk_paths or ["/"]
         self.cgroup = os.path.exists(f"{CG}/cgroup.controllers") and _read(f"{CG}/memory.current") is not None
         self._prev_cpu = None
         self.cpu_percent()  # prime the delta
@@ -57,7 +58,13 @@ class Metrics:
 
     def collect(self):
         used, limit = self.memory()
-        disk = psutil.disk_usage("/")
+        disks = {}
+        for path in self.disk_paths:
+            try:
+                disks[path] = round(psutil.disk_usage(path).percent, 1)
+            except OSError:
+                pass
+        root = psutil.disk_usage("/")
         try:
             load1 = round(os.getloadavg()[0], 2)
         except OSError:
@@ -68,8 +75,9 @@ class Metrics:
             "mem_used_mb": round(used / 1048576, 1),
             "mem_limit_mb": round(limit / 1048576, 1),
             "mem_pct": round(used / limit * 100, 1) if limit else None,
-            "disk_pct": round(disk.percent, 1),
-            "disk_free_gb": round(disk.free / 1073741824, 2),
+            "disk_pct": max(disks.values()) if disks else None,   # worst mount
+            "disks": disks,
+            "disk_free_gb": round(root.free / 1073741824, 2),
             "load1_host": load1,
             "source": "cgroup" if self.cgroup else "host",
         }

@@ -15,6 +15,7 @@ DEFAULTS = {
         "slow_query_crit_s": 10.0,
     },
     "processes": [],
+    "disk_paths": ["/"],
     "logs": [],
     "mask": {"hash_ips": True, "hash_emails": True},
     "buffer_path": "/var/lib/ismas-agent/buffer.jsonl",
